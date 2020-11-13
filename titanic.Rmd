@@ -1,0 +1,58 @@
+---
+title: "Titanic"
+author: "Chris Bednarczyk"
+date: "11/10/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(data.table)
+library(ggplot2)
+```
+
+## Overview
+The goal of this project is to predict whether a passenger on the Titanic survived.
+
+## Data
+The data are a list of passengers on the vessel with different characteristics and a flag indicating if they survived. The passengers have already been randomly split into train and test groups.
+```{r}
+train = fread("Data/train.csv")
+str(train)
+```
+
+## Data Preprocessing
+The following passenger characteristics are first converted to factor: Pclass, Sex, Embarked.
+```{r}
+convertToFactors <- function(dt) {
+     dt[,`:=`(Survived=as.factor(Survived),Pclass=as.factor(Pclass),Sex=as.factor(Sex),Embarked=as.factor(Embarked))]
+     dt
+}
+train = convertToFactors(train)
+```
+}
+
+## Exploratory Data Analysis
+Let's first explore the data by creating summary plots of each potential explanatory variable, coded by survival. The plots below show the proportion of passengers that survived in different groups of each passenger characteristic: ticket class (Pclass), sex, port of embarkation (Embarked, C=Cherbourg, Q=Queenstown, S=Southampton), age, number of siblings/spouses aboard (Sibsp), number of parents/children aboard (Parch), and fare.
+When segmenting by ticket class, it is clear that the majority of passengers were in third class, and that class had the lowest survival rate. First class appears to have had the best survival rate. Women had a much higher survival rate than men. Those embarking from Cherbourg fared better than those from Southampton and Queenstown.
+The distributions of passengers by age are similar between survivors and those who died. Some exceptions are for young children and those in their 30s, who had higher survival rates. Passengers in their late teens and early 20s had lower rates. Those with no siblings or spouse on board had much higher death rates, while those with one had lower rates. The same trend is seen with number of children or parents. Finally, passengers who paid higher fares had greater survival rates than those who paid less. This makes sense based on the rates seen with ticket class.
+```{r}
+categoricalVars = c("Pclass","Sex","Embarked")
+continuousVars = c("Age","SibSp","Parch","Fare")
+print(ggplot(train) + geom_bar(aes(x=1,fill=Survived),position="stack"))
+for (var in categoricalVars) {
+     print(ggplot(train) + geom_bar(aes_string(x=var,fill="Survived"),position="stack"))
+}
+for (var in continuousVars) {
+     print(ggplot(train) + geom_histogram(aes_string(x=var,y="..density..",fill="Survived"),position="dodge"))
+}
+```
+
+## Predict Survival
+I first try simple logistic regression models to predict survival.
+```{r}
+trainAndTestLogistic <- function(dt.train, var, dt.test) {
+     f = glm(Survived~I(var), dt.train, family="binomial")
+     p.test = predict(f, dt.test, type="response") > 0.5
+}
+varlist = c(categoricalVars,continuousVars)
