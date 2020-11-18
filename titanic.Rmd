@@ -7,8 +7,10 @@ output: html_document
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
+rm(list=ls())
 library(data.table)
 library(ggplot2)
+library(caret)
 ```
 
 ## Overview
@@ -19,16 +21,33 @@ The data are a list of passengers on the vessel with different characteristics a
 ```{r}
 train = fread("Data/train.csv")
 str(train)
+# train.save = copy(train)
 ```
 
 ## Data Preprocessing
-The following passenger characteristics are first converted to factor: Pclass, Sex, Embarked.
+The following passenger characteristics are first converted to factor: Pclass, Sex, Embarked. Missing ages are imputed with the median age. Additional variables Alone and NumRelatives are calculated from SibSp and Parch.
 ```{r}
 convertToFactors <- function(dt) {
-     dt[,`:=`(Survived=as.factor(Survived),Pclass=as.factor(Pclass),Sex=as.factor(Sex),Embarked=as.factor(Embarked))]
+        dt[,`:=`(Pclass=as.factor(Pclass),Sex=as.factor(Sex),Embarked=as.factor(Embarked))]
+        if (any(colnames(dt)=="Survived")) {
+                dt[,Survived:=as.factor(Survived)]
+        }
      dt
 }
 train = convertToFactors(train)
+
+# Preprocess data by imputing NA values of Age with median.
+medianAge = median(train[,Age], na.rm=TRUE)
+train[is.na(Age),Age:=medianAge]
+
+addVariables <- function(dt) {
+        # Create new variable Alone, which is 1 if the passenger has no siblings, spouse, parents, or children on board.
+        dt[,Alone:=as.factor(ifelse(SibSp==0 & Parch==0, 1, 0))]
+        # Create new variable NumRelatives, which is the sum of the number of siblings/spouse and parents/children.
+        dt[,NumRelatives:=SibSp+Parch]
+        dt
+}
+train = addVariables(train)
 ```
 }
 
@@ -36,9 +55,10 @@ train = convertToFactors(train)
 Let's first explore the data by creating summary plots of each potential explanatory variable, coded by survival. The plots below show the proportion of passengers that survived in different groups of each passenger characteristic: ticket class (Pclass), sex, port of embarkation (Embarked, C=Cherbourg, Q=Queenstown, S=Southampton), age, number of siblings/spouses aboard (Sibsp), number of parents/children aboard (Parch), and fare.
 When segmenting by ticket class, it is clear that the majority of passengers were in third class, and that class had the lowest survival rate. First class appears to have had the best survival rate. Women had a much higher survival rate than men. Those embarking from Cherbourg fared better than those from Southampton and Queenstown.
 The distributions of passengers by age are similar between survivors and those who died. Some exceptions are for young children and those in their 30s, who had higher survival rates. Passengers in their late teens and early 20s had lower rates. Those with no siblings or spouse on board had much higher death rates, while those with one had lower rates. The same trend is seen with number of children or parents. Finally, passengers who paid higher fares had greater survival rates than those who paid less. This makes sense based on the rates seen with ticket class.
-```{r}
-categoricalVars = c("Pclass","Sex","Embarked")
-continuousVars = c("Age","SibSp","Parch","Fare")
+```{r, warning=FALSE}
+categoricalVars = c("Pclass","Sex","Embarked","Alone")
+continuousVars = c("Age","SibSp","Parch","NumRelatives","Fare")
+varlist = c(categoricalVars,continuousVars)
 print(ggplot(train) + geom_bar(aes(x=1,fill=Survived),position="stack"))
 for (var in categoricalVars) {
      print(ggplot(train) + geom_bar(aes_string(x=var,fill="Survived"),position="stack"))
@@ -48,11 +68,60 @@ for (var in continuousVars) {
 }
 ```
 
-## Predict Survival
-I first try simple logistic regression models to predict survival.
-```{r}
-trainAndTestLogistic <- function(dt.train, var, dt.test) {
-     f = glm(Survived~I(var), dt.train, family="binomial")
-     p.test = predict(f, dt.test, type="response") > 0.5
-}
-varlist = c(categoricalVars,continuousVars)
+## Train Predictive Models
+Different predictive models are trained using 10-fold cross validation: logistic regression (with stepwise selection), decision tree, linear discriminant analysis, k-nearest neighbors, naive Bayes, and random forest. Models are evaluated using accuracy. All of the models are competitive with each other, except k-nearest neighbors, producing accuracies near 0.80. The best performer on average is the random forest, but the figure below indicates that there is significant overlap with other classification models.
+```{r, warning=FALSE}
+# Remove variables in train that are not of interest (e.g., passenger name).
+savelist = c(varlist,"Survived")
+train = train[,..savelist]
+
+# Set up 10-fold cross validation training.
+tc = trainControl(method="cv", number=10)
+
+modelList = list()
+seed = 1234
+
+set.seed(seed)
+# Logistic regression
+modelList[["glm"]] = train(Survived~., data=train, trControl=tc, method="glmStepAIC", family="binomial", trace=FALSE)
+
+set.seed(seed)
+# Decision tree
+modelList[["rpart"]] = train(Survived~., data=train, trControl=tc, method="rpart")
+
+set.seed(seed)
+# Linear discriminant analysis
+modelList[["lda"]] = train(Survived~., data=train, trControl=tc, method="lda")
+
+set.seed(seed)
+# k nearest neighbors
+modelList[["knn"]] = train(Survived~., data=train, trControl=tc, method="knn")
+
+set.seed(seed)
+# Naive Bayes
+modelList[["nb"]] = train(Survived~., data=train, trControl=tc, method="nb")
+
+set.seed(seed)
+# Random forest
+modelList[["rf"]] = train(Survived~., data=train, trControl=tc, method="rf")
+
+modelNames = c("Logistic Regression","Decision Tree","Linear Discriminant Analysis","k-Nearest Neighbors","Naive Bayes","Random Forest")
+results = resamples(modelList, modelNames=modelNames)
+dotplot(results)
+```
+
+## Predict Survivors in Test Sample
+I select the random forest model and predict survivors from the test sample.
+```{r, warning=FALSE}
+test = fread("Data/test.csv")
+test = convertToFactors(test)
+# Impute NA ages with median from train set.
+test[is.na(Age),Age:=medianAge]
+# Impute NA fares with 0.
+test[is.na(Fare),Fare:=0]
+test = addVariables(test)
+test[,PredSurvived:=predict(modelList[["rf"]],test)]
+# Output predictions to file.
+dir.create("Output", recursive=TRUE)
+fwrite(test[,.(PassengerId,Survived=PredSurvived)], "Output/prediction.csv")
+```
